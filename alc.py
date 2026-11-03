@@ -891,7 +891,10 @@ def obtenerPose2D(Hj, K):
     r2 = lam * multiplicar(K_inv, c2)
     r3 = producto_cruz(r1, r2)
 
-    Rj = np.column_stack((r1, r2, r3))
+    Rj = np.zeros((3, 3))
+    Rj[:, 0] = r1
+    Rj[:, 1] = r2
+    Rj[:, 2] = r3
     tj = lam * multiplicar(K_inv, c3)
 
     return Rj, tj
