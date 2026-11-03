@@ -234,3 +234,170 @@ class TestDegenerados:
         Q = alc.obtenerQ3d(_proyectar(M, obj), obj)
         M_rec = alc.resolverDLT3D(Q)
         assert not _misma_m_a_escala(M, M_rec)
+
+
+# ======================================================================
+# devolverMatricesCalibracion3d (issue #5) — descomposición M -> K, R, t
+# ======================================================================
+
+def _camara_para_descomponer(rng):
+    """
+    Cámara de referencia para la descomposición, caso general del Ej 2:
+    K con skew γ≠0 y focales distintos por eje, R rotación exacta,
+    t con t3 > 0, y M con escala arbitraria (simula la salida de
+    resolverDLT3D): M = μ·K[R|t], con M[2,3] >= 0 impuesto.
+    IMPORTANTE: la columna 4 es K·t (ec. 4 del TP), no t a secas.
+    """
+    K = np.array([[1000., 5., 320.],       # γ = 5 ≠ 0, αu ≠ αv
+                  [0.,   900., 240.],
+                  [0.,    0.,  1.]])
+    # rotación exacta: QR de una matriz fija con semilla (np.linalg es
+    # libre acá: los tests NO van al entregado)
+    R = np.linalg.qr(rng.standard_normal((3, 3)) + np.eye(3))[0]
+    if np.linalg.det(R) < 0:
+        R[:, 0] *= -1.0                    # asegura det(R) = +1
+    t = np.array([10., -20., 400.])        # t3 > 0: puntos delante
+    M = K @ np.hstack([R, t.reshape(3, 1)])
+    M *= 3.7e-7                            # μ arbitrario (simula el DLT)
+    if M[2, 3] < 0:
+        M *= -1.0                          # convención m34 >= 0
+    return M, K, R, t
+
+
+def _camara_sintetica_skew(rng, gamma):
+    """Cámara con skew forzado (para el test del signo de γ)."""
+    K = np.array([[1000., gamma, 320.],
+                  [0.,   900.,  240.],
+                  [0.,    0.,   1.]])
+    R = np.linalg.qr(rng.standard_normal((3, 3)) + np.eye(3))[0]
+    if np.linalg.det(R) < 0:
+        R[:, 0] *= -1.0
+    t = np.array([10., -20., 400.])
+    M = K @ np.hstack([R, t.reshape(3, 1)]) * 3.7e-7
+    if M[2, 3] < 0:
+        M *= -1.0
+    return M, K, R, t
+
+
+class TestDevolverMatricesCalibracion3d:
+
+    def test_orden_y_formas(self, rng):
+        """Contrato del enunciado (pág. 4): devuelve R, t y K en ese orden,
+        con K33 = 1 por construcción."""
+        M, *_ = _camara_para_descomponer(rng)
+        R, t, K = alc.devolverMatricesCalibracion3d(M)
+        assert R.shape == (3, 3) and t.shape == (3,) and K.shape == (3, 3)
+        assert K[2, 2] == 1.0
+
+    def test_recuperacion_exacta(self, rng):
+        """Datos sin ruido: K, R y t exactos salvo punto flotante
+        (con la escala μ arbitraria del DLT incluida)."""
+        M, K_ref, R_ref, t_ref = _camara_para_descomponer(rng)
+        R, t, K = alc.devolverMatricesCalibracion3d(M)
+        assert np.allclose(K, K_ref, atol=1e-8)
+        assert np.allclose(R, R_ref, atol=1e-8)
+        assert np.allclose(t, t_ref, atol=1e-8)
+
+    def test_ortonormalidad_R(self, rng):
+        """R es rotación: RᵀR = I y det = +1 (lo pide el enunciado)."""
+        M, *_ = _camara_para_descomponer(rng)
+        R, *_ = alc.devolverMatricesCalibracion3d(M)
+        assert np.allclose(R.T @ R, np.eye(3), atol=1e-10)
+        assert np.allclose(np.linalg.det(R), 1.0, atol=1e-10)
+
+    def test_consistencia_con_M(self, rng):
+        """QA cruzado de todo el despeje: μ·K[R|t] reproduce la entrada."""
+        M, *_ = _camara_para_descomponer(rng)
+        R, t, K = alc.devolverMatricesCalibracion3d(M)
+        mu = np.linalg.norm(M[2, :3])
+        assert np.allclose(mu * K @ np.hstack([R, t.reshape(3, 1)]),
+                           M, atol=1e-12 * max(1.0, np.abs(M).max()))
+
+    def test_signo_de_gamma(self, rng):
+        """γ sale con SU signo: el 'signo automático' de a1'·a2p.
+        (Normas no distinguen signo; el producto interno sí.)"""
+        M, *_ = _camara_sintetica_skew(rng, -5.0)      # γ negativo
+        R, t, K = alc.devolverMatricesCalibracion3d(M)
+        assert K[0, 1] < 0
+        R, t, K = alc.devolverMatricesCalibracion3d(
+            _camara_sintetica_skew(rng, 5.0)[0])       # γ positivo
+        assert K[0, 1] > 0
+
+    def test_invariante_a_escala(self, rng):
+        """M con dos escalas distintas → misma (K, R, t): el μ es
+        invisible para la descomposición tras ρ = 1/‖a3‖."""
+        M1, *_ = _camara_para_descomponer(rng)
+        M2 = M1 * 1e5
+        if M2[2, 3] < 0:
+            M2 *= -1.0
+        R1, t1, K1 = alc.devolverMatricesCalibracion3d(M1)
+        R2, t2, K2 = alc.devolverMatricesCalibracion3d(M2)
+        assert np.allclose(K1, K2, atol=1e-5)
+        assert np.allclose(R1, R2, atol=1e-10)
+        assert np.allclose(t1, t2, atol=1e-5)
+
+    def test_rechaza_m34_negativo(self, rng):
+        """Guard de la convención de signos de resolverDLT3D: se exige
+        m34 >= 0 (μ > 0, cámara 'hacia adelante')."""
+        M, *_ = _camara_para_descomponer(rng)
+        with pytest.raises(AssertionError):
+            alc.devolverMatricesCalibracion3d(-M)
+
+    def test_gamma_0_exacto(self, rng):
+        """gamma_0 sobre cámara con γ=0 real: despeje exacto."""
+        M, K_ref, R_ref, t_ref = _camara_sintetica_skew(rng, 0.0)
+        R, t, K = alc.devolverMatricesCalibracion3d(M, gamma_0=True)
+        assert K[0, 1] == 0.0
+        assert np.allclose(K, K_ref, atol=1e-8)
+        assert np.allclose(R, R_ref, atol=1e-8)
+        assert np.allclose(t, t_ref, atol=1e-8)
+
+    def test_gamma_0_sobre_gamma_real(self, rng):
+        """γ=5 real con gamma_0 impuesto: K12 = 0 y αu absorbe el γ²
+        (αu = √(αu² + γ²)); R queda sana (fila 3 intacta, r1 desde r2×r3).
+        Documenta que la restricción falsa imponeed un residuo (en K)."""
+        M, *_ = _camara_sintetica_skew(rng, 5.0)
+        R, t, K = alc.devolverMatricesCalibracion3d(M, gamma_0=True)
+        assert K[0, 1] == 0.0
+        assert np.isclose(K[0, 0], np.hypot(1000., 5.), atol=1e-6)
+        assert np.allclose(R.T @ R, np.eye(3), atol=1e-10)
+
+    def test_au_av_exacto(self, rng):
+        """au_av sobre cámara que de verdad cumple αu=αv (γ=5): no-op →
+        despeje exacto (αu_base == αv_base al punto flotante)."""
+        K_ref = np.array([[1000., 5., 320.], [0., 1000., 240.], [0., 0., 1.]])
+        R_ref = np.linalg.qr(rng.standard_normal((3, 3)) + np.eye(3))[0]
+        if np.linalg.det(R_ref) < 0:
+            R_ref[:, 0] *= -1.0
+        t_ref = np.array([10., -20., 400.])
+        M = K_ref @ np.hstack([R_ref, t_ref.reshape(3, 1)]) * 3.7e-7
+        if M[2, 3] < 0:
+            M *= -1.0
+        R, t, K = alc.devolverMatricesCalibracion3d(M, au_av=True)
+        assert np.allclose(K, K_ref, atol=1e-8)
+        assert np.allclose(R, R_ref, atol=1e-8)
+        assert np.allclose(t, t_ref, atol=1e-8)
+
+    def test_ambas_flags_exacto(self, rng):
+        """γ=0 y αu=αv en cámara que cumple ambos → exacto."""
+        K_ref = np.array([[1000., 0., 320.], [0., 1000., 240.], [0., 0., 1.]])
+        R_ref = np.linalg.qr(rng.standard_normal((3, 3)) + np.eye(3))[0]
+        if np.linalg.det(R_ref) < 0:
+            R_ref[:, 0] *= -1.0
+        t_ref = np.array([10., -20., 400.])
+        M = K_ref @ np.hstack([R_ref, t_ref.reshape(3, 1)]) * 3.7e-7
+        if M[2, 3] < 0:
+            M *= -1.0
+        R, t, K = alc.devolverMatricesCalibracion3d(M, au_av=True, gamma_0=True)
+        assert np.allclose(K, K_ref, atol=1e-8)
+        assert np.allclose(R, R_ref, atol=1e-8)
+        assert np.allclose(t, t_ref, atol=1e-8)
+
+    def test_flags_default_regresion(self, rng):
+        """Defaults (False, False): el caso general da lo mismo que el
+        despeje base (regresión del código previo al inciso d)."""
+        M, K_ref, R_ref, t_ref = _camara_para_descomponer(rng)
+        R, t, K = alc.devolverMatricesCalibracion3d(M)
+        assert np.allclose(K, K_ref, atol=1e-8)
+        assert np.allclose(R, R_ref, atol=1e-8)
+        assert np.allclose(t, t_ref, atol=1e-8)
