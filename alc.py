@@ -118,7 +118,7 @@ def resolver_triangular_superior(A, b):
     return restri(A, b, False)
 
 
-def norma(X,p):
+def norma(X,p=2):
     """
     Norma vectorial p de X.
 
@@ -687,6 +687,43 @@ def producto_cruz(a, b):
 # ======================================================================
 # Ejercicio 2 — Calibración de cámara 3-D (DLT)
 # ======================================================================
+def _ortonormalizarR(r1, r2, r3):
+    """
+    Devuelve una rotación exacta (RRᵀ = I, det = +1) a partir de tres
+    filas r1, r2, r3 (convención filas = ejes de cámara en mundo) que
+    vienen de la descomposición de M y pueden salir con ruido.
+
+    Procedimiento (Gram-Schmidt corto, de abajo hacia arriba):
+      1. r3 se toma como referencia (normalizado).
+      2. r2 se reortogonaliza contra r3 y se normaliza.
+      3. r1 se RECOMPUTA como r2×r3 → garantiza det = +1 exacto.
+
+    Parámetros
+    ----------
+    r1, r2, r3 : ndarrays (3,) — filas de la rotación estimada.
+
+    Devuelve
+    --------
+    R : ndarray (3, 3) — rotación ortonormal (filas r1, r2, r3).
+    """
+    # 1. normalizar r3
+    r3 = r3 / norma(r3)
+
+    # 2. quitar la componente de r3 de r2 y normalizar
+    r2 = r2 - np.sum(r2 * r3) * r3
+    r2 = r2 / norma(r2)
+
+    # 3. r1 = r2×r3: unitaria por construcción y de la mano correcta
+    #    (sistema de filas derecho: r3 = r1×r2 ⟺ r1 = r2×r3)
+    r1 = producto_cruz(r2, r3)
+
+    R = np.zeros((3, 3))
+    R[0, :] = r1
+    R[1, :] = r2
+    R[2, :] = r3
+    return R
+
+
 def obtenerQ3d(imgPts, objPts):
     """
     Dada una vista del objeto, arma la matriz del sistema DLT (ec. 6 de Tsai 1987).
@@ -745,3 +782,97 @@ def resolverDLT3D(Q):
     if M[2,3] < 0: M *= -1 # Opcional: se pide para determinar el signo y facilitar la ejecución de Tests
 
     return M
+
+
+def devolverMatricesCalibracion3d(M, au_av=False, gamma_0=False):
+    """
+    Descompone la matriz de cámara M = μ·K[R|t] (salida de resolverDLT3D)
+    en intrínsecos K (K33 = 1), rotación R (ortonormal, filas = ejes de
+    cámara en mundo) y traslación t (en cm, unidades del patrón calib/3d).
+
+    Parámetros
+    ----------
+    M : ndarray (3, 4) — matriz de cámara de resolverDLT3D (requiere m34 ≥ 0).
+
+    Devuelve
+    --------
+    R : ndarray (3, 3) — rotación ortonormal (RRᵀ = I, det = +1).
+    t : ndarray (3,)   — traslación en cm.
+    K : ndarray (3, 3) — intrínsecos con K33 = 1.
+    """
+    
+    assert M.shape == (3, 4), "M debe ser (3, 4) (salida de resolverDLT3D)"
+    assert M[2, 3] >= 0, "m34 < 0: viola la convención de resolverDLT3D"
+
+    a1 = M[0, :3] # μ·(αu·r1 + γ·r2 + u0·r3)
+    a2 = M[1, :3] # μ·(αv·r2 + v0·r3)
+    a3 = M[2, :3] # μ·r3
+    b  = M[:, 3]  # μ·(αu·t1 + γ·t2 + u0·t3, αv·t2 + v0·t3, t3)
+
+    # --- escala: ρ = 1/μ (μ = ‖a3‖ > 0 por la convención m34 ≥ 0) -----
+    # a3 = M_est[2,:3] = μ · r3ᵀ   →   ‖a3‖ = μ · ‖r3‖ = μ · 1 = μ
+    rho = 1 / norma(a3)
+
+    # Despejamos centro óptico (u0, v0), alpha_u, alpha_v, gamma, R
+    
+    # Recordando: 
+    # M = μ·K[R|t]
+    # ri,j son ortonormales: r1·r3 = 0,    r2·r3 = 0,    r3·r3 = 1 
+    # 1/μ² = ρ²
+
+    # --- centro óptico -------------------------------------------------
+    # Del producto interno: a1·a3 - tenemos que
+    # a1·a3 = μ²·(αu·r1 + γ·r2 + u0·r3)·r3
+    #       = μ²·[ αu·(r1·r3)  +  γ·(r2·r3)  +  u0·(r3·r3) ] = μ²·u0
+    u0 = rho**2 * np.sum(a1 * a3) # u0 = ρ²·(a1·a3)
+    
+    # a2·a3 - Similar
+    v0 = rho**2 * np.sum(a2 * a3) # v0 = ρ²·(a2·a3)
+
+    # --- filas sin el aporte del centro  --------
+    a1p = a1 - u0 * a3 # (a1' = μ(αu r1 + γ r2))
+    a2p = a2 - v0 * a3 # (a2' = μ(αv r2))
+
+    # ‖a2p‖ = ‖μ·αv·r2‖ = μ·αv·‖r2‖ = μ·αv·1 = μ·αv
+    a2pNorma = norma(a2p)
+    assert a2pNorma > 0, "a2' degenerado: M no corresponde a una cámara válida"
+
+    # Despejo alpha_v y gamma
+    alpha_v = rho * a2pNorma # αv = (1/μ)·μ·αv = ρ·μ·αv = ρ·‖a2'‖
+    gamma = rho * np.sum(a1p * a2p) / a2pNorma # γ = ρ·(a1'·a2')/‖a2'‖
+    if gamma_0: gamma = 0.0
+
+    # Despejo alpha_u
+    # ‖a1p‖² = ‖μ(αu·r1 + γ·r2)‖²
+    #        = μ²·‖αu·r1 + γ·r2‖²
+    #        = μ²·[ αu²·‖r1‖² + γ²·‖r2‖² + 2·αu·γ·(r1·r2) ]
+    #        = μ²·[ αu² + γ² + 0 ] 
+    #        = μ²·(αu² + γ²)
+    # αu² = ‖a1p‖²/μ² − γ² = ρ²·‖a1p‖² − γ²; max(0,·) absorbe redondeos negativos de punto flotante
+    if au_av:
+        alpha_u = alpha_v
+    else:
+        alpha_u = np.sqrt(np.max((0.0, rho**2 * np.sum(a1p * a1p) - gamma**2)))
+    
+    # --- K --Ecuación (4) del TP -----------------------------------------
+    K = np.zeros((3, 3))
+    K[0, 0] = alpha_u
+    K[0, 1] = gamma
+    K[0, 2] = u0
+    K[1, 1] = alpha_v
+    K[1, 2] = v0
+    K[2, 2] = 1.0
+
+    # --- R (filas = ejes de cámara en el mundo) ----------------------
+    r2 = a2p / a2pNorma
+    r3 = rho * a3
+    r1 = (rho * a1p - gamma * r2) / alpha_u
+    R = _ortonormalizarR(r1, r2, r3) # garantiza RRᵀ = I y det(R) = +1
+
+    # --- t (traslación en cm) ----------------------------------------
+    t3 = rho * b[2]
+    t2 = (rho * b[1] - v0 * t3) / alpha_v
+    t1 = (rho * b[0] - u0 * t3 - gamma * t2) / alpha_u
+    t = np.array((t1, t2, t3))
+
+    return R,t,K
