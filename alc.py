@@ -726,18 +726,24 @@ def _ortonormalizarR(r1, r2, r3):
 
 def obtenerQ3d(imgPts, objPts):
     """
-    Dada una vista del objeto, arma la matriz del sistema DLT (ec. 6 de Tsai 1987).
+    Arma la matriz Q del sistema DLT homogéneo (ec. 6 de Tsai 1987): Q m = 0.
 
-    Con imgPts (n, 2): pixeles (u, v) de los n puntos en ESTA vista
-    Con objPts (n, 3): correspondencias (U, V, W) reales en cm.
+    Parámetros
+    ----------
+    imgPts : ndarray (n, 2) — mediciones en esta vista, filas (u, v) en píxeles.
+    objPts : ndarray (n, 3) — correspondencias (U, V, W) en unidades del
+             patrón (cm en calib/3d), mismo orden que imgPts.
 
-    Devuelve:
-      Q : (2n, 12) — dos filas por punto; para cada i:
-            [U, V, W, 1, 0, 0, 0, 0, -uU, -uV, -uW, -u]       (fila impar)
-            [0, 0, 0, 0, U, V, W, 1, -vU, -vV, -vW, -v]       (fila par)
-      tal que Q m = 0 con m = (m11..m34) elementos de M por filas.
+    Devuelve
+    --------
+    Q : ndarray (2n, 12) — sistema Q m = 0, con m = (m11..m34) los
+        coeficientes de M por filas. Dos filas por punto i:
+          fila impar : [U, V, W, 1,  0,  0,  0,  0,  -u·U, -u·V, -u·W, -u]
+          fila par   : [0, 0, 0, 0,  U,     V,     W,     1,    -v·U, -v·V, -v·W, -v]
 
-    Supone: misma cámara física en los n puntos (una única vista/pose).
+    Supone: los n puntos comparten una única pose (misma cámara fija
+    respecto del patrón dentro de la vista). Con n < 6 el sistema queda
+    subdeterminado (rango esperado 11, Ej 1-a) — lo valida resolverDLT3D.
     """
     n_obj = objPts.shape[0]
     n_img = imgPts.shape[0]
@@ -756,14 +762,24 @@ def obtenerQ3d(imgPts, objPts):
 
 def resolverDLT3D(Q):
     """
-    Resuelve el DLT: devuelve la matriz de cámara M (3, 4) desde Q de obtenerQ3d.
+    Resuelve el DLT: mínimos cuadrados homogéneo → matriz de cámara M.
 
-    Implementa ec. 8 (Ej 1b): m = arg min ||Qm||² con ||m|| = 1 →
-    m = v12 = última fila de Vt (autovector derecho del menor valor singular).
-    Determinada salvo escala y signo; se impone m34 >= 0 (camara "hacia
-    adelante": con calib/3d equivale a w > 0).
+    Implementa la ec. 8 (Ej 1-b): m = arg min ‖Qm‖² sujeto a ‖m‖ = 1,
+    equivalente al autovector del menor autovalor de QᵀQ. Se resuelve
+    con SVD: m = v12, última fila de Vt (valor singular mínimo).
 
-    Requiere Q (2n, 12) con n >= 6 (rango 11, Ej 1a).
+    Parámetros
+    ----------
+    Q : ndarray (2n, 12) — sistema de obtenerQ3d; requiere n ≥ 6 puntos
+        no coplanarios (Q de rango 11, Ej 1-a), se valida con asserts.
+
+    Devuelve
+    --------
+    M : ndarray (3, 4) — cámara μ·K[R|t], reshape de m por filas.
+        Determinada salvo escala; se fija el signo con m34 ≥ 0
+        ("mira adelante de la cámara"; en calib/3d equivale a w > 0)
+        para que la descomposición de devolverMatricesCalibracion3d
+        sea única.
     """
 
     assert Q.shape[1] == 12, "Q debe tener 12 columnas (12 incognitas del DLT)"
@@ -793,6 +809,11 @@ def devolverMatricesCalibracion3d(M, au_av=False, gamma_0=False):
     Parámetros
     ----------
     M : ndarray (3, 4) — matriz de cámara de resolverDLT3D (requiere m34 ≥ 0).
+    au_av (bool, opcional) — impone αu = αv conservando αv, el despeje
+        directo de la fila 2 (sin término de skew); r1 y t1 se
+        re-derivan con el αu nuevo. Default: False.
+    gamma_0 (bool, opcional) — impone γ = 0 antes del despeje de αu.
+        Default: False.
 
     Devuelve
     --------
