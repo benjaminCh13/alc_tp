@@ -26,6 +26,20 @@ def multiplicar(A,B):
             res[i,j] = sum(A[i,:] * B[:,j])
     return res
 
+def producto_escalar(u, v):
+    """
+    Producto escalar u·v = sum(ui * vi) entre vectores.
+
+    Parámetros
+    ----------
+    u, v : ndarray con formas compatibles ((n,), (n,1) o (1,n)) — se
+           aplanan internamente para tolerar filas/columnas.
+    Devuelve
+    --------
+    float: el producto escalar (elemento a elemento + sum, sin np.dot).
+    """
+    u, v = u.flatten(), v.flatten()   # primero aplanar: evita el broadcasting (n,1)*(n,)
+    return sum(u * v)
 
 def transponer(A):
     """
@@ -874,12 +888,22 @@ def calcularMatrizK2D(A):
 
 def obtenerPose2D(Hj, K):
     """
-    Hj = [c1, c2, c3] ∈ R^{3x3} es la homografía de la j-ésima imagen (ya resuelta)
-    y K ∈ R^{3x3} es la matriz intrínseca (ya resuelta).
+    Pose (Rj, tj) de la cámara para la j-ésima vista, a partir de la
+    homografía Hj = [c1 c2 c3] (signo arbitrario, del DLT) y la matriz
+    intrínseca K. Devuelve Rj ∈ R^{3x3} rotación con det(Rj) = +1
+    (columnas r1, r2, r3) y tj ∈ R^{3} en las unidades del mundo.
 
-    Devuelve la pose (Rj, tj) de la cámara para la j-ésima imagen, con
-    Rj ∈ R^{3x3} ortogonal (rotación) y tj ∈ R^{3} (traslación) tal que
-    [Rj | tj] = K⁻¹ * Hj * λ, con λ > 0 para que Rj sea ortogonal (det(Rj) = 1).
+    Descomposición: λ·r1 = K⁻¹·c1, λ·r2 = K⁻¹·c2, λ·tj = K⁻¹·c3 con
+    λ = 1/‖K⁻¹·c1‖ y r3 = r1×r2. Con datos ruidosos los ejes se cuadran
+    por Gram-Schmidt anclado en r1 (el único unitario exacto) para dejar
+    Rj ortogonal exacta.
+
+    Ambigüedad de pose planar: H y −H reproyectan idénticos los puntos
+    del plano Z=0. Se devuelve la rama con profundidad positiva,
+    suponiendo que el origen del mundo (esquina 0 del tablero) está
+    adelante de la cámara (⇔ t_z > 0 en la toma real). Si da t_z < 0 se
+    niegan r1, r2 y tj (r3 queda igual). La H de entrada no se modifica;
+    K es invariante al signo de H.
     """
 
     c1, c2, c3 = Hj[:, 0], Hj[:, 1], Hj[:, 2]
@@ -889,6 +913,10 @@ def obtenerPose2D(Hj, K):
     lam = 1 / norma(u1) # λ = 1/‖K⁻¹·c₁‖
     r1 = lam * u1
     r2 = lam * multiplicar(K_inv, c2)
+    # Gram Schmidt: r2 ⊥ r1 y ‖r2‖ = 1
+    r2 = r2 - producto_escalar(r2, r1) * r1
+    r2 /= norma(r2)
+    # r3 ⊥ r2 ⊥ r1; det(R) = +1 queda gratis
     r3 = producto_cruz(r1, r2)
 
     Rj = np.zeros((3, 3))
@@ -896,5 +924,9 @@ def obtenerPose2D(Hj, K):
     Rj[:, 1] = r2
     Rj[:, 2] = r3
     tj = lam * multiplicar(K_inv, c3)
+
+    if tj[2] < 0: # El origen del mundo está adelante de la cámara (⇔ t_z > 0).
+        Rj[:, 0:2] = -Rj[:, 0:2]
+        tj = -tj
 
     return Rj, tj
