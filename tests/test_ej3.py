@@ -262,7 +262,7 @@ class TestResolverDLT2D:
         w = H @ np.vstack([X, Y, np.ones(77)])
         proj = np.column_stack([w[0] / w[2], w[1] / w[2]])
         err = np.max(np.sqrt(np.sum((proj - imgPts) ** 2, axis=1)))
-        assert err < 1.0   # QA previo: 0.37–0.55 px en las 10 imágenes
+        assert err < 1.0   # QA previo: 0.37–0.60 px en las 20 imágenes
 
 
 # ======================================================================
@@ -381,15 +381,15 @@ class TestCalcularMatrizK2D:
                            alc.calcularMatrizK2D(A), atol=1e-9)
 
     def test_con_datos_reales_plausibilidad(self):
-        """Cadenas completas con los 10 captcha-sheet reales:
+        """Cadenas completas con las 20 imágenes reales de calib/coplanar:
         corners → Q → H → A → K. Umbrales de plausibilidad FIJADOS desde la
-        corrida 2026-10-27 (no aprobados a mano): fx=742.3, fy=753.6
-        (ratio 0.985) y c = (520.5, 299.3), contra el centro teórico del
+        corrida 2026-11-05 (20 vistas): fx=744.5, fy=755.7
+        (ratio 0.985) y c = (520.5, 298.6), contra el centro teórico del
         formato 1024×576 ~ (512, 288)."""
         archivo = os.path.join(REPO, "calib", "coplanar", "detected_corners.txt")
         if not os.path.exists(archivo):
             pytest.skip("no hay datos reales en esta máquina")
-        det = np.loadtxt(archivo)                       # (10, 154)
+        det = np.loadtxt(archivo)                       # (20, 154)
         objPts = np.column_stack([30.0 * (np.arange(77) % 11),
                                   30.0 * (np.arange(77) // 11),
                                   np.zeros(77)])
@@ -462,18 +462,31 @@ class TestObtenerPose2D:
             assert np.allclose(Rj.T @ Rj, np.eye(3), atol=1e-9), f"vista {k}"
             assert np.isclose(np.linalg.det(Rj), 1.0, atol=1e-9), f"vista {k}"
 
-    def test_signo_arbitrario_de_H(self, datos_sinteticos):
-        """Si el DLT devuelve −H, la pose sigue una rotación válida
-        (alternativa R' = R·diag(−1,−1,1), det +1, RRᵀ=I) — el usuario proviene
-        del signo arbitrario del vector nulo (mismo fenómeno que el caso de b)."""
+    def test_ambiguedad_planar_resuelta(self, datos_sinteticos):
+        """H y −H deben devolver LA MISMA pose: el criterio del signo
+        (t_z > 0, origen del mundo adelante de la cámara) cancela el
+        signo arbitrario del vector nulo del DLT. Con r3 = r1×r2 el flip
+        de r1, r2 y t deja la ortogonalidad intacta sin recalcular."""
         d = datos_sinteticos
         H0 = d["Hlst"][0]
-        Rj, _ = alc.obtenerPose2D(-H0, d["K"])
-        assert np.allclose(Rj.T @ Rj, np.eye(3), atol=1e-9)
-        assert np.isclose(np.linalg.det(Rj), 1.0, atol=1e-9)
+        R1, t1 = alc.obtenerPose2D(H0, d["K"])
+        R2, t2 = alc.obtenerPose2D(-H0, d["K"])
+        assert np.allclose(R1, R2, atol=1e-12)
+        assert np.allclose(t1, t2, atol=1e-12)
+
+    def test_pureza_H_sin_modificar(self, datos_sinteticos):
+        """obtenerPose2D es pura: la corrección de signo va en la SALIDA
+        (r1, r2, t), la H de entrada no se toca."""
+        d = datos_sinteticos
+        H0 = d["Hlst"][0].copy()
+        H_referencia = H0.copy()
+        alc.obtenerPose2D(H0, d["K"])
+        alc.obtenerPose2D(-H0, d["K"])
+        assert np.array_equal(H0, H_referencia)
+
 
     def test_con_datos_reales_pose(self):
-        """Pose de la imagen 1 real con K de las 10: reproduce las esquinas
+        """Pose de la imagen 1 real con K de las 20: reproduce las esquinas
         con tolerancia holgada (el ruido de H rompe la ortogonalidad exacta
         — la banda de power de este test guard es Hartley, issue #8)."""
         archivo = os.path.join(REPO, "calib", "coplanar", "detected_corners.txt")
@@ -499,3 +512,28 @@ class TestObtenerPose2D:
         v = K[1, :] @ p_c / p_c[2]
         err = np.max(np.sqrt((u - imgPts[:, 0])**2 + (v - imgPts[:, 1])**2))
         assert err < 5.0
+
+    def test_signo_y_rotacion_exacta_reales(self):
+        """Las 20 vistas reales del Ej 3, fijando lo verificado a mano en
+        la sesión 2026-11-04: la pose elegida tiene t_z > 0 y min z > 0
+        sobre las 77 esquinas del tablero (profundidad positiva, la rama
+        con profundidad negativa descartada), y R es rotación exacta
+        (‖RRᵀ−I‖ < 1e-10, det = +1) gracias al Gram-Schmidt anclado en r1."""
+        archivo = os.path.join(REPO, "calib", "coplanar", "detected_corners.txt")
+        if not os.path.exists(archivo):
+            pytest.skip("no hay datos reales en esta máquina")
+        det = np.loadtxt(archivo)
+        objPts = np.column_stack([30.0*(np.arange(77)%11),
+                                  30.0*(np.arange(77)//11),
+                                  np.zeros(77)])
+        Hs = [alc.resolverDLT2D(alc.obtenerQ2d(det[k].reshape(77,2), objPts))
+              for k in range(det.shape[0])]
+        K = alc.calcularMatrizK2D(alc.armarA(Hs))
+        X, Y = objPts[:, 0], objPts[:, 1]
+        for k, Hk in enumerate(Hs):
+            Rj, tj = alc.obtenerPose2D(Hk, K)
+            assert tj[2] > 0, f"vista {k+1}: t_z <= 0 (pose espejada)"
+            z = X*Rj[2,0] + Y*Rj[2,1] + tj[2]
+            assert z.min() > 0, f"vista {k+1}: un punto del tablero detrás de la cámara"
+            assert np.linalg.norm(Rj.T @ Rj - np.eye(3)) < 1e-10, f"vista {k+1}"
+            assert np.isclose(np.linalg.det(Rj), 1.0, atol=1e-10), f"vista {k+1}"
