@@ -262,7 +262,7 @@ class TestResolverDLT2D:
         w = H @ np.vstack([X, Y, np.ones(77)])
         proj = np.column_stack([w[0] / w[2], w[1] / w[2]])
         err = np.max(np.sqrt(np.sum((proj - imgPts) ** 2, axis=1)))
-        assert err < 1.0   # QA previo: 0.37–0.55 px en las 10 imágenes
+        assert err < 1.0   # QA previo: 0.37–0.60 px en las 20 imágenes
 
 
 # ======================================================================
@@ -381,15 +381,15 @@ class TestCalcularMatrizK2D:
                            alc.calcularMatrizK2D(A), atol=1e-9)
 
     def test_con_datos_reales_plausibilidad(self):
-        """Cadenas completas con los 10 captcha-sheet reales:
+        """Cadenas completas con las 20 imágenes reales de calib/coplanar:
         corners → Q → H → A → K. Umbrales de plausibilidad FIJADOS desde la
-        corrida 2026-10-27 (no aprobados a mano): fx=742.3, fy=753.6
-        (ratio 0.985) y c = (520.5, 299.3), contra el centro teórico del
+        corrida 2026-11-05 (20 vistas): fx=744.5, fy=755.7
+        (ratio 0.985) y c = (520.5, 298.6), contra el centro teórico del
         formato 1024×576 ~ (512, 288)."""
         archivo = os.path.join(REPO, "calib", "coplanar", "detected_corners.txt")
         if not os.path.exists(archivo):
             pytest.skip("no hay datos reales en esta máquina")
-        det = np.loadtxt(archivo)                       # (10, 154)
+        det = np.loadtxt(archivo)                       # (20, 154)
         objPts = np.column_stack([30.0 * (np.arange(77) % 11),
                                   30.0 * (np.arange(77) // 11),
                                   np.zeros(77)])
@@ -486,7 +486,7 @@ class TestObtenerPose2D:
 
 
     def test_con_datos_reales_pose(self):
-        """Pose de la imagen 1 real con K de las 10: reproduce las esquinas
+        """Pose de la imagen 1 real con K de las 20: reproduce las esquinas
         con tolerancia holgada (el ruido de H rompe la ortogonalidad exacta
         — la banda de power de este test guard es Hartley, issue #8)."""
         archivo = os.path.join(REPO, "calib", "coplanar", "detected_corners.txt")
@@ -514,7 +514,7 @@ class TestObtenerPose2D:
         assert err < 5.0
 
     def test_signo_y_rotacion_exacta_reales(self):
-        """Las 10 vistas reales del Ej 3, fijando lo verificado a mano en
+        """Las 20 vistas reales del Ej 3, fijando lo verificado a mano en
         la sesión 2026-11-04: la pose elegida tiene t_z > 0 y min z > 0
         sobre las 77 esquinas del tablero (profundidad positiva, la rama
         con profundidad negativa descartada), y R es rotación exacta
