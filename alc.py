@@ -4,7 +4,6 @@ import numpy as np
 # LABO — ALC: operaciones y álgebra base (issue #1)
 # ======================================================================
 
-
 def multiplicar(A,B):
     """
     Producto matricial A·B (reemplaza a @ / np.dot).
@@ -27,6 +26,20 @@ def multiplicar(A,B):
             res[i,j] = sum(A[i,:] * B[:,j])
     return res
 
+def producto_escalar(u, v):
+    """
+    Producto escalar u·v = sum(ui * vi) entre vectores.
+
+    Parámetros
+    ----------
+    u, v : ndarray con formas compatibles ((n,), (n,1) o (1,n)) — se
+           aplanan internamente para tolerar filas/columnas.
+    Devuelve
+    --------
+    float: el producto escalar (elemento a elemento + sum, sin np.dot).
+    """
+    u, v = u.flatten(), v.flatten()   # primero aplanar: evita el broadcasting (n,1)*(n,)
+    return sum(u * v)
 
 def transponer(A):
     """
@@ -118,7 +131,7 @@ def resolver_triangular_superior(A, b):
     return restri(A, b, False)
 
 
-def norma(X,p):
+def norma(X,p=2):
     """
     Norma vectorial p de X.
 
@@ -683,6 +696,455 @@ def producto_cruz(a, b):
     res[1] = a[2]*b[0] - a[0]*b[2]
     res[2] = a[0]*b[1] - a[1]*b[0]
     return res
+
+
+# ======================================================================
+# Ejercicio 2 — Calibración de cámara 3-D (DLT)
+# ======================================================================
+def _ortonormalizarR(r1, r2, r3):
+    """
+    Devuelve una rotación exacta (RRᵀ = I, det = +1) a partir de tres
+    filas r1, r2, r3 (convención filas = ejes de cámara en mundo) que
+    vienen de la descomposición de M y pueden salir con ruido.
+
+    Procedimiento (Gram-Schmidt corto, de abajo hacia arriba):
+      1. r3 se toma como referencia (normalizado).
+      2. r2 se reortogonaliza contra r3 y se normaliza.
+      3. r1 se RECOMPUTA como r2×r3 → garantiza det = +1 exacto.
+
+    Parámetros
+    ----------
+    r1, r2, r3 : ndarrays (3,) — filas de la rotación estimada.
+
+    Devuelve
+    --------
+    R : ndarray (3, 3) — rotación ortonormal (filas r1, r2, r3).
+    """
+    # 1. normalizar r3
+    r3 = r3 / norma(r3)
+
+    # 2. quitar la componente de r3 de r2 y normalizar
+    r2 = r2 - np.sum(r2 * r3) * r3
+    r2 = r2 / norma(r2)
+
+    # 3. r1 = r2×r3: unitaria por construcción y de la mano correcta
+    #    (sistema de filas derecho: r3 = r1×r2 ⟺ r1 = r2×r3)
+    r1 = producto_cruz(r2, r3)
+
+    R = np.zeros((3, 3))
+    R[0, :] = r1
+    R[1, :] = r2
+    R[2, :] = r3
+    return R
+
+
+def obtenerQ3d(imgPts, objPts):
+    """
+    Arma la matriz Q del sistema DLT homogéneo (ec. 6 de Tsai 1987): Q m = 0.
+
+    Parámetros
+    ----------
+    imgPts : ndarray (n, 2) — mediciones en esta vista, filas (u, v) en píxeles.
+    objPts : ndarray (n, 3) — correspondencias (U, V, W) en unidades del
+             patrón (cm en calib/3d), mismo orden que imgPts.
+
+    Devuelve
+    --------
+    Q : ndarray (2n, 12) — sistema Q m = 0, con m = (m11..m34) los
+        coeficientes de M por filas. Dos filas por punto i:
+          fila impar : [U, V, W, 1,  0,  0,  0,  0,  -u·U, -u·V, -u·W, -u]
+          fila par   : [0, 0, 0, 0,  U,     V,     W,     1,    -v·U, -v·V, -v·W, -v]
+
+    Supone: los n puntos comparten una única pose (misma cámara fija
+    respecto del patrón dentro de la vista). Con n < 6 el sistema queda
+    subdeterminado (rango esperado 11, Ej 1-a) — lo valida resolverDLT3D.
+    """
+    n_obj = objPts.shape[0]
+    n_img = imgPts.shape[0]
+    assert n_obj == n_img, "Cantidad de puntos 3D y 2D debe ser la misma"
+
+    Q = np.zeros((2*n_img, 12))
+
+    for i in range(n_img):
+        u, v = imgPts[i]
+        U, V, W = objPts[i]
+
+        Q[2*i]     = [U, V, W, 1, 0, 0, 0, 0, -u*U, -u*V, -u*W, -u]
+        Q[2*i + 1] = [0, 0, 0, 0, U, V, W, 1, -v*U, -v*V, -v*W, -v]
+    
+    return Q
+
+def resolverDLT3D(Q):
+    """
+    Resuelve el DLT: mínimos cuadrados homogéneo → matriz de cámara M.
+
+    Implementa la ec. 8 (Ej 1-b): m = arg min ‖Qm‖² sujeto a ‖m‖ = 1,
+    equivalente al autovector del menor autovalor de QᵀQ. Se resuelve
+    con SVD: m = v12, última fila de Vt (valor singular mínimo).
+
+    Parámetros
+    ----------
+    Q : ndarray (2n, 12) — sistema de obtenerQ3d; requiere n ≥ 6 puntos
+        no coplanarios (Q de rango 11, Ej 1-a), se valida con asserts.
+
+    Devuelve
+    --------
+    M : ndarray (3, 4) — cámara μ·K[R|t], reshape de m por filas.
+        Determinada salvo escala; se fija el signo con m34 ≥ 0
+        ("mira adelante de la cámara"; en calib/3d equivale a w > 0)
+        para que la descomposición de devolverMatricesCalibracion3d
+        sea única.
+    """
+
+    assert Q.shape[1] == 12, "Q debe tener 12 columnas (12 incognitas del DLT)"
+    assert Q.shape[0] >= 12, "Q debe tener al menos 12 filas (n >= 6 puntos, Ej 1a)"
+
+    _,_,Vt = svd(Q)
+    v12 = Vt[11] # v12 es un array de R12 -> autovector de menor sigma
+    m = v12 # [m11, m12, m13, m14, m21, m22, m23, m24, m31, m32, m33, m34]
+
+    M = m.reshape(3,4) # reshape reordena row-major, llena fila 1, fila 2, fila 3, con elementos de izquierda a derecha
+    # M =
+    # [m11, m12, m13, m14] = [r11, r12, r13, t1] 
+    # [m21, m22, m23, m24] = [r21, r22, r23, t2]
+    # [m31, m32, m33, m34] = [r31, r32, r33, t3]
+
+    if M[2,3] < 0: M *= -1 # Opcional: se pide para determinar el signo y facilitar la ejecución de Tests
+
+    return M
+
+
+def devolverMatricesCalibracion3d(M, au_av=False, gamma_0=False):
+    """
+    Descompone la matriz de cámara M = μ·K[R|t] (salida de resolverDLT3D)
+    en intrínsecos K (K33 = 1), rotación R (ortonormal, filas = ejes de
+    cámara en mundo) y traslación t (en cm, unidades del patrón calib/3d).
+
+    Parámetros
+    ----------
+    M : ndarray (3, 4) — matriz de cámara de resolverDLT3D (requiere m34 ≥ 0).
+    au_av (bool, opcional) — impone αu = αv conservando αv, el despeje
+        directo de la fila 2 (sin término de skew); r1 y t1 se
+        re-derivan con el αu nuevo. Default: False.
+    gamma_0 (bool, opcional) — impone γ = 0 antes del despeje de αu.
+        Default: False.
+
+    Devuelve
+    --------
+    R : ndarray (3, 3) — rotación ortonormal (RRᵀ = I, det = +1).
+    t : ndarray (3,)   — traslación en cm.
+    K : ndarray (3, 3) — intrínsecos con K33 = 1.
+    """
+    
+    assert M.shape == (3, 4), "M debe ser (3, 4) (salida de resolverDLT3D)"
+    assert M[2, 3] >= 0, "m34 < 0: viola la convención de resolverDLT3D"
+
+    a1 = M[0, :3] # μ·(αu·r1 + γ·r2 + u0·r3)
+    a2 = M[1, :3] # μ·(αv·r2 + v0·r3)
+    a3 = M[2, :3] # μ·r3
+    b  = M[:, 3]  # μ·(αu·t1 + γ·t2 + u0·t3, αv·t2 + v0·t3, t3)
+
+    # --- escala: ρ = 1/μ (μ = ‖a3‖ > 0 por la convención m34 ≥ 0) -----
+    # a3 = M_est[2,:3] = μ · r3ᵀ   →   ‖a3‖ = μ · ‖r3‖ = μ · 1 = μ
+    rho = 1 / norma(a3)
+
+    # Despejamos centro óptico (u0, v0), alpha_u, alpha_v, gamma, R
+    
+    # Recordando: 
+    # M = μ·K[R|t]
+    # ri,j son ortonormales: r1·r3 = 0,    r2·r3 = 0,    r3·r3 = 1 
+    # 1/μ² = ρ²
+
+    # --- centro óptico -------------------------------------------------
+    # Del producto interno: a1·a3 - tenemos que
+    # a1·a3 = μ²·(αu·r1 + γ·r2 + u0·r3)·r3
+    #       = μ²·[ αu·(r1·r3)  +  γ·(r2·r3)  +  u0·(r3·r3) ] = μ²·u0
+    u0 = rho**2 * np.sum(a1 * a3) # u0 = ρ²·(a1·a3)
+    
+    # a2·a3 - Similar
+    v0 = rho**2 * np.sum(a2 * a3) # v0 = ρ²·(a2·a3)
+
+    # --- filas sin el aporte del centro  --------
+    a1p = a1 - u0 * a3 # (a1' = μ(αu r1 + γ r2))
+    a2p = a2 - v0 * a3 # (a2' = μ(αv r2))
+
+    # ‖a2p‖ = ‖μ·αv·r2‖ = μ·αv·‖r2‖ = μ·αv·1 = μ·αv
+    a2pNorma = norma(a2p)
+    assert a2pNorma > 0, "a2' degenerado: M no corresponde a una cámara válida"
+
+    # Despejo alpha_v y gamma
+    alpha_v = rho * a2pNorma # αv = (1/μ)·μ·αv = ρ·μ·αv = ρ·‖a2'‖
+    gamma = rho * np.sum(a1p * a2p) / a2pNorma # γ = ρ·(a1'·a2')/‖a2'‖
+    if gamma_0: gamma = 0.0
+
+    # Despejo alpha_u
+    # ‖a1p‖² = ‖μ(αu·r1 + γ·r2)‖²
+    #        = μ²·‖αu·r1 + γ·r2‖²
+    #        = μ²·[ αu²·‖r1‖² + γ²·‖r2‖² + 2·αu·γ·(r1·r2) ]
+    #        = μ²·[ αu² + γ² + 0 ] 
+    #        = μ²·(αu² + γ²)
+    # αu² = ‖a1p‖²/μ² − γ² = ρ²·‖a1p‖² − γ²; max(0,·) absorbe redondeos negativos de punto flotante
+    if au_av:
+        alpha_u = alpha_v
+    else:
+        alpha_u = np.sqrt(np.max((0.0, rho**2 * np.sum(a1p * a1p) - gamma**2)))
+    
+    # --- K --Ecuación (4) del TP -----------------------------------------
+    K = np.zeros((3, 3))
+    K[0, 0] = alpha_u
+    K[0, 1] = gamma
+    K[0, 2] = u0
+    K[1, 1] = alpha_v
+    K[1, 2] = v0
+    K[2, 2] = 1.0
+
+    # --- R (filas = ejes de cámara en el mundo) ----------------------
+    r2 = a2p / a2pNorma
+    r3 = rho * a3
+    r1 = (rho * a1p - gamma * r2) / alpha_u
+    R = _ortonormalizarR(r1, r2, r3) # garantiza RRᵀ = I y det(R) = +1
+
+    # --- t (traslación en cm) ----------------------------------------
+    t3 = rho * b[2]
+    t2 = (rho * b[1] - v0 * t3) / alpha_v
+    t1 = (rho * b[0] - u0 * t3 - gamma * t2) / alpha_u
+    t = np.array((t1, t2, t3))
+
+    return R,t,K
+
+# ======================================================================
+# Ejercicio 3 — Zhang coplanar
+# ======================================================================
+def obtenerQ2d(imgPts, objPts):
+    """
+    Arma la matriz Q ∈ R^{2nx9} del sistema homogéneo Q·m = 0 (ec. 11)
+    para calibración coplanar: cada punto aporta 2 filas
+    [U V 1 0 0 0 -uU -uV -u] y [0 0 0 U V 1 -vU -vV -v].
+
+    Parámetros
+    ----------
+    imgPts : ndarray (n,2)  — proyecciones (u, v) en píxeles.
+    objPts : ndarray (n,3)  — puntos del tablero (X, Y, Z) en mm (Z=0);
+                                la función usa solo (X, Y) y homogeneíza
+                                internamente a (U, V, 1).
+
+    Devuelve
+    --------
+    Q : ndarray (2n, 9)
+    """
+
+    n_img = imgPts.shape[0]
+    n_obj = objPts.shape[0]
+
+    # Las mediciones de la imagen y las coordenadas del objeto deben coincidir
+    assert n_img == n_obj, f"Cantidad de puntos de imagen ({n_img}) y objeto ({n_obj}) debe coincidir."
+
+    n = n_img  # cantidad de puntos
+    Q = np.zeros((2*n, 9))
+
+    for i in range(n):
+        u, v = imgPts[i]        # coordenadas de la imagen (u, v)
+        U, V = objPts[i, :2]    # solo tomamos U, V (W=0) y homogeneizamos a (U, V, 1)
+
+        Q[2*i]   = [U, V, 1, 0, 0, 0, -u*U, -u*V, -u]
+        Q[2*i+1] = [0, 0, 0, U, V, 1, -v*U, -v*V, -v]
+
+    return Q
+
+def resolverDLT2D(Q):
+    """
+    Resuelve Q·h = 0 con ‖h‖=1 (ec. 8: mín ‖Qh‖² con norma fijada)
+    y devuelve la homografía H ∈ R^{3x3} (reshape por filas).
+
+    Parámetros
+    ----------
+    Q : ndarray (2n, 9) — matriz del sistema homogéneo.
+
+    Devuelve
+    --------
+    H : ndarray (3, 3)
+    """
+
+    # Se resuelve el sistema homogéneo Q·h = 0 usando SVD
+    U, S, Vt = svd(Q)
+    
+    # El vector h es el último vector singular (correspondiente al menor valor singular)
+    h = Vt[-1]
+
+    return h.reshape((3, 3))
+
+def v_ij(H, i, j):
+    """
+    Coeficientes de la restricción c_i^T · B · c_j, lineales en
+    b = (B11, B12, B22, B13, B23, B33)  (Zhang 2000, ec. v_ij·b = 0).
+
+    Parámetros
+    ----------
+    H : ndarray (3, 3) — homografía de una imagen (ya resuelta).
+    i, j : int — índices 0-based de COLUMNAS de H (i, j ∈ {0, 1, 2}).
+
+    Devuelve
+    --------
+    v : ndarray (6,) — fila de coeficientes para la matriz A.
+    """
+
+    # 1. Extraer las columnas de H que participan en la restricción:
+    #      h_i = columna i de H    (h_i[k] = H[k, i])
+    #      h_j = columna j de H    (h_j[k] = H[k, j])
+    h_i = H[:, i]
+    h_j = H[:, j]
+
+    # 2. Armar el vector de 6 coeficientes, en el orden de los slots de b:
+    #      slot 0 (B11): h_i[0]·h_j[0]                          ← producto simple
+    #      slot 1 (B12): h_i[0]·h_j[1] + h_i[1]·h_j[0]          ← cruzada simetrizada
+    #      slot 2 (B22): h_i[1]·h_j[1]                          ← producto simple
+    #      slot 3 (B13): h_i[0]·h_j[2] + h_i[2]·h_j[0]          ← cruzada simetrizada
+    #      slot 4 (B23): h_i[1]·h_j[2] + h_i[2]·h_j[1]          ← cruzada simetrizada
+    #      slot 5 (B33): h_i[2]·h_j[2]                          ← producto simple
+    #    Los slots de la DIAGONAL de B (0, 2, 5)
+    #    son productos simples h_i[m]·h_j[m]; los Cruzados (1, 3, 4) son la
+    #    suma simétrica h_i[m]·h_j[n] + h_i[n]·h_j[m] con (m, n) el par correspondiente.
+    v = np.zeros(6)
+    v[0] = h_i[0] * h_j[0]
+    v[1] = h_i[0] * h_j[1] + h_i[1] * h_j[0]
+    v[2] = h_i[1] * h_j[1]
+    v[3] = h_i[0] * h_j[2] + h_i[2] * h_j[0]
+    v[4] = h_i[1] * h_j[2] + h_i[2] * h_j[1]
+    v[5] = h_i[2] * h_j[2]
+
+    return v
+
+def armarA(Hlst):
+    """
+    Arma la matriz A del sistema homogéneo A·b = 0 (Zhang) para
+    calibrar la cámara a partir de N homografías ya resueltas.
+
+    Cada homografía aporta 2 filas:
+      - A[2k]   = v12(H_k):  impone  c₁ᵀ B c₂ = 0        (r1 ⊥ r2)
+      - A[2k+1] = v11(H_k) - v22(H_k):  impone  c₁ᵀ B c₁ = c₂ᵀ B c₂  (‖r1‖=‖r2‖)
+
+    con b = (B11, B12, B22, B13, B23, B33)ᵀ y B = K⁻ᵀ K⁻¹ (simétrica).
+
+    Parámetros
+    ----------
+    Hlst : lista de ndarray (3, 3)
+        Una homografía por imagen, en el mismo orden que las capturas.
+
+    Devuelve
+    --------
+    A : ndarray (2N, 6)
+    """
+
+    # 1. Cantidad de homografías N y prealocación de A con np.zeros((2N, 6)).
+    N = len(Hlst)  # cantidad de homografías N
+    A = np.zeros((2 * N, 6))
+
+    # 2. Loop por cada homografía H_k (enumerate sobre Hlst, índice k):
+    #    2a. A[2k]   = v_ij(H_k, 0, 1)                   → fila v12
+    #    2b. A[2k+1] = v_ij(H_k, 0, 0) − v_ij(H_k, 1, 1) → fila v11 − v22
+    for k in range(N):
+        H_k = Hlst[k]
+        A[2*k] = v_ij(H_k, 0, 1)
+        A[2*k + 1] = v_ij(H_k, 0, 0) - v_ij(H_k, 1, 1)
+
+    return A
+
+
+def calcularMatrizK2D(A):
+    """
+    Calcula K a partir de la matriz A del sistema A·b = 0 (Zhang, ec. 13).
+
+    Paso: resuelve el núcleo de A via SVD → b (signo arbitrario) → arma la
+    B simétrica b-slot → fija el signo global para que B sea definida
+    positiva ( requisito del Cholesky y el enunciado) → K = inv(Lᵀ) con
+    B = L·Lᵀ → normaliza K33 = 1.
+
+    Parámetros
+    ----------
+    A : ndarray (2N, 6) — matriz de restricciones, N ≥ 3 vistas.
+
+    Devuelve
+    --------
+    K : ndarray (3, 3) — matriz intrínseca con K[2,2] = 1.
+    """
+
+     # Guard: A debe tener las 6 columnas de b y al menos 3 vistas (6 filas)
+    assert A.shape[1] == 6, f"A debe ser (·, 6); recibida shape {A.shape}"
+    assert A.shape[0] >= 6, f"Se necesitan ≥ 3 vistas (≥ 6 filas en A); {A.shape[0]}"
+
+    # Se resuelve el sistema homogéneo A·b = 0 usando SVD
+    U, S, Vt = svd(A)
+
+    # Último vector singular (correspondiente al menor valor singular)
+    b = Vt[-1]
+
+    # Signo: el sistema es homogéneo, b y -b son equivalentes. Cholesky exige
+    # B definida positiva; B[0,0] > 0 es suficiente para fijar el signo global
+    if b[0] < 0:
+        b = -b
+
+    # Armar B simétrica con los slots b = (B11, B12, B22, B13, B23, B33)
+    B = np.array([[b[0], b[1], b[3]],
+                  [b[1], b[2], b[4]],
+                  [b[3], b[4], b[5]]])
+
+    # Se obtiene la matriz de calibración K a partir de B usando Cholesky
+    # B = L * Lt, donde L es triangular inferior y Lt es su transpuesta
+    L = cholesky(B)
+    
+    # Como B = K^-T * K^-1, entonces K = inv(Lt)
+    K = inversa(L.T)
+
+    # Normalizar para que K[2, 2] = 1
+    K /= K[2, 2] 
+
+    return K
+
+def obtenerPose2D(Hj, K):
+    """
+    Pose (Rj, tj) de la cámara para la j-ésima vista, a partir de la
+    homografía Hj = [c1 c2 c3] (signo arbitrario, del DLT) y la matriz
+    intrínseca K. Devuelve Rj ∈ R^{3x3} rotación con det(Rj) = +1
+    (columnas r1, r2, r3) y tj ∈ R^{3} en las unidades del mundo.
+
+    Descomposición: λ·r1 = K⁻¹·c1, λ·r2 = K⁻¹·c2, λ·tj = K⁻¹·c3 con
+    λ = 1/‖K⁻¹·c1‖ y r3 = r1×r2. Con datos ruidosos los ejes se cuadran
+    por Gram-Schmidt anclado en r1 (el único unitario exacto) para dejar
+    Rj ortogonal exacta.
+
+    Ambigüedad de pose planar: H y −H reproyectan idénticos los puntos
+    del plano Z=0. Se devuelve la rama con profundidad positiva,
+    suponiendo que el origen del mundo (esquina 0 del tablero) está
+    adelante de la cámara (⇔ t_z > 0 en la toma real). Si da t_z < 0 se
+    niegan r1, r2 y tj (r3 queda igual). La H de entrada no se modifica;
+    K es invariante al signo de H.
+    """
+
+    c1, c2, c3 = Hj[:, 0], Hj[:, 1], Hj[:, 2]
+    K_inv = inversa(K)
+
+    u1 = multiplicar(K_inv, c1)
+    lam = 1 / norma(u1) # λ = 1/‖K⁻¹·c₁‖
+    r1 = lam * u1
+    r2 = lam * multiplicar(K_inv, c2)
+    # Gram Schmidt: r2 ⊥ r1 y ‖r2‖ = 1
+    r2 = r2 - producto_escalar(r2, r1) * r1
+    r2 /= norma(r2)
+    # r3 ⊥ r2 ⊥ r1; det(R) = +1 queda gratis
+    r3 = producto_cruz(r1, r2)
+
+    Rj = np.zeros((3, 3))
+    Rj[:, 0] = r1
+    Rj[:, 1] = r2
+    Rj[:, 2] = r3
+    tj = lam * multiplicar(K_inv, c3)
+
+    if tj[2] < 0: # El origen del mundo está adelante de la cámara (⇔ t_z > 0).
+        Rj[:, 0:2] = -Rj[:, 0:2]
+        tj = -tj
+
+    return Rj, tj
+
 
 
 # ======================================================================
